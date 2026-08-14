@@ -360,5 +360,24 @@ describe("worker trust contract", () => {
         now: 1_300,
       }),
     ).toThrow(/expired/i);
+
+    expect(() =>
+      verifyWorkerHeartbeat({
+        record: approved,
+        envelope: signWorkerHeartbeat(
+          {
+            workerId: "worker-a",
+            keyId: "key-a",
+            approvalEpoch: approved.approvalEpoch,
+            nonce: "nonce-exact-expiry",
+            issuedAt: 1_200,
+            expiresAt: 1_300,
+            manifest: BASE_MANIFEST,
+          },
+          "secret-a",
+        ),
+        now: 1_300,
+      }),
+    ).toThrow(/expired/i);
   });
 });

@@ -278,7 +278,7 @@ export function verifyWorkerHeartbeat(params: {
   if (envelope.issuedAt > params.now + maxClockSkewMs) {
     throw new Error("worker heartbeat issuedAt is too far in the future");
   }
-  if (params.now > envelope.expiresAt) {
+  if (params.now >= envelope.expiresAt) {
     throw new Error("worker heartbeat is expired");
   }
 
