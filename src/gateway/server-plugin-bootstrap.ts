@@ -38,6 +38,7 @@ type GatewayStartupTrace = {
 };
 
 type GatewayPluginBootstrapParams = {
+  boundChatStartup?: PluginRegistryParams["boundChatStartup"];
   cfg: OpenClawConfig;
   activationSourceConfig?: OpenClawConfig;
   workspaceDir: string;
@@ -112,6 +113,7 @@ export function prepareGatewayPluginLoad(params: GatewayPluginBootstrapParams) {
   // hooks that inspect gateway/node/subagent helpers see current config.
   installGatewayPluginRuntimeEnvironment(resolvedConfig);
   const loaded = loadGatewayPlugins({
+    boundChatStartup: params.boundChatStartup,
     cfg: resolvedConfig,
     activationSourceConfig,
     autoEnabledReasons: autoEnabled.autoEnabledReasons,

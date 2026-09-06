@@ -201,6 +201,27 @@ function createRichPluginFixture(params: { id?: string; packageVersion?: string 
 }
 
 describe("installed plugin index", () => {
+  it("preserves bound-chat profile contracts as string arrays without loading runtime", () => {
+    const rootDir = makeTempDir();
+    writeRuntimeEntry(rootDir);
+    writePluginManifest(rootDir, {
+      id: "example",
+      configSchema: {},
+      contracts: { boundChat: ["bound-chat-v1", "future-profile"] },
+    });
+    const index = loadInstalledPluginIndex({
+      candidates: [createPluginCandidate({ rootDir })],
+      env: hermeticEnv(),
+    });
+    const contributions = index.plugins[0]?.contributions;
+    expect(contributions).toBeDefined();
+    if (!contributions) {
+      throw new Error("missing installed plugin contributions");
+    }
+    const contracts: Readonly<Record<string, readonly string[]>> = contributions.contracts;
+    expect(contracts.boundChat).toEqual(["bound-chat-v1", "future-profile"]);
+  });
+
   it("drops blocked install record keys while reading persisted index records", () => {
     const root = makeTempDir();
     const filePath = path.join(root, "installed-plugin-index.json");

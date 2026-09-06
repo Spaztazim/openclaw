@@ -1,5 +1,9 @@
 // Defines plugin entry and install configuration types.
 export type PluginEntryConfig = {
+  /** Operator-owned, default-deny authority. Changes require process restart. */
+  grants?: {
+    boundChat?: Array<{ allow: true; profile: "bound-chat-v1"; path: string; agentId: string }>;
+  };
   enabled?: boolean;
   hooks?: {
     /** Controls prompt mutation via before_prompt_build and prompt fields from legacy before_agent_start. */

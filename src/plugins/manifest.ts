@@ -433,6 +433,8 @@ export type PluginManifestContracts = {
   usageProviders?: string[];
   migrationProviders?: string[];
   gatewayMethodDispatch?: string[];
+  /** Profile metadata only; path/agent authority belongs exclusively to runtime grants. */
+  boundChat?: string[];
   tools?: string[];
 };
 
@@ -875,6 +877,7 @@ function normalizeManifestContracts(value: unknown): PluginManifestContracts | u
   const usageProviders = normalizeTrimmedStringList(value.usageProviders);
   const migrationProviders = normalizeTrimmedStringList(value.migrationProviders);
   const gatewayMethodDispatch = normalizeTrimmedStringList(value.gatewayMethodDispatch);
+  const boundChat = normalizeTrimmedStringList(value.boundChat);
   const tools = normalizeTrimmedStringList(value.tools);
   const contracts = {
     ...(embeddedExtensionFactories.length > 0 ? { embeddedExtensionFactories } : {}),
@@ -898,6 +901,7 @@ function normalizeManifestContracts(value: unknown): PluginManifestContracts | u
     ...(usageProviders.length > 0 ? { usageProviders } : {}),
     ...(migrationProviders.length > 0 ? { migrationProviders } : {}),
     ...(gatewayMethodDispatch.length > 0 ? { gatewayMethodDispatch } : {}),
+    ...(boundChat.length > 0 ? { boundChat } : {}),
     ...(tools.length > 0 ? { tools } : {}),
   } satisfies PluginManifestContracts;
 

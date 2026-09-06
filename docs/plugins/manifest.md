@@ -541,6 +541,22 @@ Each field hint can include:
 
 Use `contracts` only for static capability ownership metadata that OpenClaw can read without importing the plugin runtime.
 
+The experimental bound-chat profile uses `"boundChat": ["bound-chat-v1"]`.
+It remains a string array: unknown profile strings are inert metadata, not
+permissions. Registration through `api.registerBoundChatRoute` additionally
+requires an exact, cold-start [operator grant](/gateway/configuration-reference#bound-chat-operator-grants).
+The separate registration API supplies `path`, `agentId`, `profile`, an
+`authenticate(req)` callback, and `handler(req, res, capability)`. Authentication
+must parse, authenticate, authorize conversation/operation labels, and enforce
+replay policy before returning `{ authenticated: true, conversationKey, operationKey }`;
+return `false` to deny. The authenticated handler receives only fixed
+`submit({ message, attachments?, timeoutMs? })`, `wait({ timeoutMs? })`, and
+`read({ limit?, offset?, maxChars? })` operations. No arbitrary Gateway target or
+scope selection is exposed. Capabilities are request-lifetime-only and cannot be
+retained for later use; recovery requires fresh authentication with the same
+approved labels. Do not infer that a timeout or sanitized failure means a run did
+not execute.
+
 ```json
 {
   "contracts": {

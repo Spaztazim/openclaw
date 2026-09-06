@@ -335,6 +335,8 @@ function mergeGatewayClientInternal(
 }
 
 type DispatchGatewayMethodInProcessOptions = {
+  /** Core-only lifecycle guard, checked after lazy loading and immediately before effects. */
+  beforeDispatch?: (client: GatewayRequestOptions["client"]) => void;
   allowSyntheticModelOverride?: boolean;
   agentRunTracking?: "plugin_subagent";
   disableSyntheticClient?: boolean;
@@ -466,6 +468,11 @@ export async function dispatchGatewayMethodInProcessRaw(
   if (options?.disableSyntheticClient === true && !scopedClient) {
     throw new Error(`In-process gateway dispatch requires a scoped client (method: ${method}).`);
   }
+  const client =
+    options?.forceSyntheticClient === true
+      ? syntheticClient
+      : (scopedClient ?? (options?.disableSyntheticClient === true ? null : syntheticClient));
+  options?.beforeDispatch?.(client);
   void handleGatewayRequest({
     req: {
       type: "req",
@@ -473,10 +480,7 @@ export async function dispatchGatewayMethodInProcessRaw(
       method,
       params,
     },
-    client:
-      options?.forceSyntheticClient === true
-        ? syntheticClient
-        : (scopedClient ?? (options?.disableSyntheticClient === true ? null : syntheticClient)),
+    client,
     isWebchatConnect,
     respond: (ok, payload, error, meta) => {
       const response = { ok, payload, error, ...(meta ? { meta } : {}) };
@@ -784,6 +788,7 @@ function createGatewayPluginRegistrationLogger(params?: {
 }
 
 export function loadGatewayPlugins(params: {
+  boundChatStartup?: PluginRegistryParams["boundChatStartup"];
   cfg: OpenClawConfig;
   activationSourceConfig?: OpenClawConfig;
   autoEnabledReasons?: Readonly<Record<string, string[]>>;
@@ -876,6 +881,7 @@ export function loadGatewayPlugins(params: {
   const beforeLoad = performance.now();
   const loaderStatsBefore = getPluginModuleLoaderStats();
   const pluginRegistry = loadOpenClawPlugins({
+    boundChatStartup: params.boundChatStartup,
     config: resolvedConfig,
     activationSourceConfig: params.activationSourceConfig ?? params.cfg,
     autoEnabledReasons: autoEnabled.autoEnabledReasons,

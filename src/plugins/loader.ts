@@ -182,6 +182,8 @@ export type PluginLoadResult = PluginRegistry;
 export { PluginLoadReentryError } from "./loader-cache-state.js";
 
 export type PluginLoadOptions = {
+  /** Explicit Gateway-instance authority. Generic/discovery callers receive none. */
+  boundChatStartup?: BoundChatStartup;
   config?: OpenClawConfig;
   activationSourceConfig?: OpenClawConfig;
   autoEnabledReasons?: Readonly<Record<string, string[]>>;
@@ -423,6 +425,8 @@ function createPluginCandidatesFromManifestRegistry(
 }
 
 export function clearPluginLoaderCache(): void {
+  // Whole-process loader reset is used by isolated cold-start tests, not hot reload.
+
   pluginLoaderCacheState.clear();
   fullWorkspacePluginLoaderCacheState.clear();
   clearActivatedPluginRuntimeState();
@@ -1861,9 +1865,15 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
   } = resolvePluginLoadCacheContext(options);
   const logger = options.logger ?? defaultLogger();
   const validateOnly = options.mode === "validate";
+
   const onlyPluginIdSet = createPluginIdScopeSet(onlyPluginIds);
 
-  const cacheEnabled = options.cache !== false && options.resolveRawConfigEnvVars !== true;
+  // Authority-bearing registries must not enter the shared generic loader cache.
+  // Even identical config can belong to a different Gateway lifetime/profile.
+  const cacheEnabled =
+    !options.boundChatStartup &&
+    options.cache !== false &&
+    options.resolveRawConfigEnvVars !== true;
   if (cacheEnabled) {
     const cached = getReusableCachedPluginRegistry({
       cacheKey,
@@ -2006,6 +2016,7 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
       registerNodeHostCommand,
       registerSecurityAuditCollector,
     } = createPluginRegistry({
+      boundChatStartup: shouldActivate && !validateOnly ? options.boundChatStartup : undefined,
       logger,
       runtime,
       coreGatewayHandlers: options.coreGatewayHandlers as Record<string, GatewayRequestHandler>,
@@ -3347,7 +3358,7 @@ export async function loadOpenClawPluginCliRegistry(
       source: record.source,
       rootDir: record.rootDir,
       registrationMode: "cli-metadata",
-      config: cfg,
+      config: withoutOperatorGrants(cfg),
       pluginConfig: validatedConfig.value,
       runtime: {} as PluginRuntime,
       logger,
@@ -3402,3 +3413,4 @@ function resolveCliMetadataEntrySource(rootDir: string): string | null {
   return null;
 }
 export { testing as __testing };
+import { withoutOperatorGrants, type BoundChatStartup } from "../config/bound-chat.js";

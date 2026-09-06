@@ -23,6 +23,37 @@ afterEach(() => {
 });
 
 describe("loadPluginManifest JSON5 tolerance", () => {
+  it.each([
+    { input: ["bound-chat-v1"], expected: ["bound-chat-v1"] },
+    {
+      input: [" bound-chat-v1 ", "future-profile", "", 42],
+      expected: ["bound-chat-v1", "future-profile"],
+    },
+    {
+      input: [{ path: "/bound-chat", agentId: "example", profile: "bound-chat-v1" }],
+      expected: undefined,
+    },
+    { input: "bound-chat-v1", expected: undefined },
+  ])(
+    "normalizes bound-chat profile metadata with the existing string-list grammar: $input",
+    ({ input, expected }) => {
+      const dir = makeTempDir();
+      fs.writeFileSync(
+        path.join(dir, "openclaw.plugin.json"),
+        JSON.stringify({
+          id: "example",
+          configSchema: {},
+          contracts: { boundChat: input },
+        }),
+      );
+      const result = loadPluginManifest(dir, false);
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.manifest.contracts?.boundChat).toEqual(expected);
+      }
+    },
+  );
+
   it("parses a standard JSON manifest without issues", () => {
     const dir = makeTempDir();
     const manifest = {

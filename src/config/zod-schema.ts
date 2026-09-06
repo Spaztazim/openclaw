@@ -272,6 +272,7 @@ const SkillEntrySchema = z
 
 const PluginEntrySchema = z
   .object({
+    grants: boundChatGrantsSchema.optional().register(sensitive),
     enabled: z.boolean().optional(),
     hooks: z
       .object({
@@ -1483,3 +1484,4 @@ export const OpenClawSchema = z
       }
     }
   });
+import { boundChatGrantsSchema } from "./bound-chat.js";

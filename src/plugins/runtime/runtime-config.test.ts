@@ -33,11 +33,47 @@ describe("createRuntimeConfig", () => {
     replaceConfigFileMock.mockReset();
     logWarnMock.mockClear();
     getRuntimeConfigMock.mockReturnValue({ plugins: {} });
-    mutateConfigFileMock.mockResolvedValue({ previousHash: null, persistedHash: "persisted-hash" });
+    mutateConfigFileMock.mockResolvedValue({
+      previousHash: null,
+      persistedHash: "persisted-hash",
+      nextConfig: {},
+      snapshot: { config: {}, sourceConfig: {}, resolved: {}, runtimeConfig: {} },
+    });
     replaceConfigFileMock.mockResolvedValue({
       previousHash: null,
       persistedHash: "persisted-hash",
     });
+  });
+
+  it("keeps operator grants out of both runtime config read APIs", () => {
+    const runtimeConfig = {
+      plugins: {
+        entries: {
+          example: {
+            grants: {
+              boundChat: [
+                { allow: true, profile: "bound-chat-v1", path: "/bound", agentId: "main" },
+              ],
+            },
+          },
+        },
+      },
+    };
+    getRuntimeConfigMock.mockReturnValue(runtimeConfig);
+    const api = createRuntimeConfig();
+    expect(api.current().plugins?.entries?.example.grants).toBeUndefined();
+    expect(api.loadConfig().plugins?.entries?.example.grants).toBeUndefined();
+    expect(runtimeConfig.plugins.entries.example.grants.boundChat).toHaveLength(1);
+  });
+
+  it("rejects granting through either replacement API", async () => {
+    const config = { plugins: { entries: { example: { grants: { boundChat: [] } } } } };
+    const api = createRuntimeConfig();
+    await expect(
+      api.replaceConfigFile({ nextConfig: config, afterWrite: { mode: "none", reason: "test" } }),
+    ).rejects.toThrow("operator-owned");
+    await expect(api.writeConfigFile(config)).rejects.toThrow("operator-owned");
+    expect(replaceConfigFileMock).not.toHaveBeenCalled();
   });
 
   it("reads config from the runtime snapshot for current and deprecated loadConfig", () => {
@@ -45,9 +81,10 @@ describe("createRuntimeConfig", () => {
     getRuntimeConfigMock.mockReturnValue(runtimeConfig);
     const configApi = createRuntimeConfig();
 
-    expect(configApi.current()).toBe(runtimeConfig);
-    expect(configApi.loadConfig()).toBe(runtimeConfig);
-    expect(getRuntimeConfigMock).toHaveBeenCalledTimes(2);
+    expect(configApi.current()).toEqual(runtimeConfig);
+    expect(configApi.current()).not.toBe(runtimeConfig);
+    expect(configApi.loadConfig()).toEqual(runtimeConfig);
+    expect(getRuntimeConfigMock).toHaveBeenCalledTimes(3);
     expect(logWarnMock).toHaveBeenCalledWith(
       `plugin runtime config.loadConfig() is deprecated (${deprecatedConfigCode}); use config.current().`,
     );
@@ -63,7 +100,7 @@ describe("createRuntimeConfig", () => {
       () => configApi.loadConfig(),
     );
 
-    expect(loaded).toBe(runtimeConfig);
+    expect(loaded).toEqual(runtimeConfig);
     expect(logWarnMock).toHaveBeenCalledWith(
       `plugin "legacy-plugin" runtime config.loadConfig() is deprecated (${deprecatedConfigCode}); use config.current(). Source: /plugins/legacy-plugin/index.js`,
     );
@@ -87,7 +124,7 @@ describe("createRuntimeConfig", () => {
     );
   });
 
-  it("routes deprecated writeConfigFile through replaceConfigFile with afterWrite", async () => {
+  it("routes deprecated writeConfigFile through locked mutation with afterWrite", async () => {
     const configApi = createRuntimeConfig();
     const nextConfig = { plugins: { entries: {} } } as OpenClawConfig;
 
@@ -96,11 +133,13 @@ describe("createRuntimeConfig", () => {
     expect(logWarnMock).toHaveBeenCalledWith(
       `plugin runtime config.writeConfigFile() is deprecated (${deprecatedConfigCode}); use config.mutateConfigFile(...) or config.replaceConfigFile(...).`,
     );
-    expect(replaceConfigFileMock).toHaveBeenCalledWith({
-      nextConfig,
-      afterWrite: { mode: "auto" },
-      writeOptions: undefined,
-    });
+    expect(mutateConfigFileMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mutate: expect.any(Function),
+        afterWrite: { mode: "auto" },
+        writeOptions: {},
+      }),
+    );
   });
 
   it("attributes deprecated writeConfigFile warnings to the active plugin scope", async () => {
@@ -115,11 +154,13 @@ describe("createRuntimeConfig", () => {
     expect(logWarnMock).toHaveBeenCalledWith(
       `plugin "legacy-plugin" runtime config.writeConfigFile() is deprecated (${deprecatedConfigCode}); use config.mutateConfigFile(...) or config.replaceConfigFile(...). Source: /plugins/legacy-plugin/index.js`,
     );
-    expect(replaceConfigFileMock).toHaveBeenCalledWith({
-      nextConfig,
-      afterWrite: { mode: "auto" },
-      writeOptions: undefined,
-    });
+    expect(mutateConfigFileMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mutate: expect.any(Function),
+        afterWrite: { mode: "auto" },
+        writeOptions: {},
+      }),
+    );
   });
 
   it("preserves explicit afterWrite intent for deprecated writeConfigFile", async () => {
@@ -130,10 +171,12 @@ describe("createRuntimeConfig", () => {
       afterWrite: { mode: "none", reason: "test-controlled" },
     });
 
-    expect(replaceConfigFileMock).toHaveBeenCalledWith({
-      nextConfig,
-      afterWrite: { mode: "none", reason: "test-controlled" },
-      writeOptions: { afterWrite: { mode: "none", reason: "test-controlled" } },
-    });
+    expect(mutateConfigFileMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mutate: expect.any(Function),
+        afterWrite: { mode: "none", reason: "test-controlled" },
+        writeOptions: {},
+      }),
+    );
   });
 });

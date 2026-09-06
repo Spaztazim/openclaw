@@ -29,6 +29,7 @@ import {
 } from "../context-engine/registry.js";
 import { createPluginGatewayMethodDescriptor } from "../gateway/methods/registry.js";
 import { isOperatorScope, type OperatorScope } from "../gateway/operator-scopes.js";
+import { canonicalizePathVariant } from "../gateway/security-path.js";
 import type { GatewayRequestHandler, RespondFn } from "../gateway/server-methods/types.js";
 import { registerInternalHook, unregisterInternalHook } from "../hooks/internal-hooks.js";
 import type { HookEntry } from "../hooks/types.js";
@@ -123,8 +124,10 @@ import {
   registerMemoryRuntimeForPlugin,
 } from "./memory-state.js";
 import { createModelCatalogRegistrationHandlers } from "./model-catalog-registration.js";
+import { boundChatData, boundChatRouteSchema, createBoundChatHandler } from "./post-auth-chat.js";
 import { normalizeRegisteredProvider } from "./provider-validation.js";
 import { createEmptyPluginRegistry } from "./registry-empty.js";
+import { getPluginRegistryGeneration } from "./registry-lifecycle.js";
 import { isPluginRegistryActivated, isPluginRegistryRetired } from "./registry-lifecycle.js";
 import type {
   PluginHttpRouteRegistration as RegistryTypesPluginHttpRouteRegistration,
@@ -406,6 +409,15 @@ function adaptPluginGatewayMethodHandler(handler: GatewayRequestHandler): Gatewa
 
 export function createPluginRegistry(registryParams: PluginRegistryParams) {
   const registry = createEmptyPluginRegistry();
+  const boundChatGrants = registryParams.boundChatStartup?.grants ?? [];
+  if (registryParams.boundChatStartup?.invalid) {
+    registry.diagnostics.push({
+      level: "error",
+      message:
+        "bound chat startup grants invalid; check exact grant fields and explicit agents.list membership, then restart",
+    });
+  }
+  const boundChatHandlers = new WeakSet<OpenClawPluginHttpRouteParams["handler"]>();
   const coreGatewayMethodNames = Array.from(
     new Set([
       ...(registryParams.coreGatewayMethodNames ?? []),
@@ -839,6 +851,39 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
       return;
     }
     const match = params.match ?? "exact";
+    const handler = params.handler;
+    const bound = boundChatHandlers.has(handler);
+    // Only exact same-owner bound-slot replacement is allowed; it revokes the old wrapper.
+    // Check ALL overlaps, not merely the first same-auth neighbor in registration order.
+    const boundOverlap = registry.httpRoutes.some((entry) => {
+      const existingBound = boundChatHandlers.has(entry.handler);
+      if (!bound && !existingBound) {
+        return false;
+      }
+      if (
+        bound &&
+        existingBound &&
+        entry.pluginId === record.id &&
+        entry.path === normalizedPath &&
+        entry.match === match
+      ) {
+        return false;
+      }
+      return (
+        Boolean(findOverlappingPluginHttpRoute([entry], { path: normalizedPath, match })) ||
+        (entry.match === "prefix" && canonicalizePathVariant(entry.path) === "/") ||
+        (match === "prefix" && canonicalizePathVariant(normalizedPath) === "/")
+      );
+    });
+    if (boundOverlap) {
+      pushDiagnostic({
+        level: "error",
+        pluginId: record.id,
+        source: record.source,
+        message: "bound chat canonical route overlap rejected",
+      });
+      return;
+    }
     const overlappingRoute = findOverlappingPluginHttpRoute(registry.httpRoutes, {
       path: normalizedPath,
       match,
@@ -884,7 +929,7 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
       registry.httpRoutes[existingIndex] = {
         pluginId: record.id,
         path: normalizedPath,
-        handler: params.handler,
+        handler,
         ...(params.handleUpgrade ? { handleUpgrade: params.handleUpgrade } : {}),
         auth: params.auth,
         match,
@@ -903,7 +948,7 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
     registry.httpRoutes.push({
       pluginId: record.id,
       path: normalizedPath,
-      handler: params.handler,
+      handler,
       ...(params.handleUpgrade ? { handleUpgrade: params.handleUpgrade } : {}),
       auth: params.auth,
       match,
@@ -915,6 +960,61 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
         : {}),
       ...(params.nodeCapability ? { nodeCapability: { ...params.nodeCapability } } : {}),
       source: record.source,
+    });
+  };
+
+  const registerBoundChatRoute = (
+    record: PluginRecord,
+    input: Parameters<OpenClawPluginApi["registerBoundChatRoute"]>[0],
+  ) => {
+    const parsed = boundChatRouteSchema.safeParse(boundChatData(input));
+
+    if (!parsed.success) {
+      pushDiagnostic({
+        level: "error",
+        pluginId: record.id,
+        source: record.source,
+        message: "bound chat registration requires canonical declaration and callbacks",
+      });
+      return;
+    }
+    const route = Object.freeze(parsed.data);
+    const matches = (entry: { path: string; agentId: string; profile: string }) =>
+      entry.path === route.path &&
+      entry.agentId === route.agentId &&
+      entry.profile === route.profile;
+    // Unknown manifest profiles remain inert metadata; the route schema admits only v1.
+    // A profile declaration never authorizes a path or agent without an exact core grant.
+    const grant = boundChatGrants.find((entry) => entry.pluginId === record.id && matches(entry));
+    if (!record.contracts?.boundChat?.includes(route.profile) || !grant) {
+      pushDiagnostic({
+        level: "error",
+        pluginId: record.id,
+        source: record.source,
+        message:
+          "bound chat registration requires a manifest profile declaration and exact operator grant",
+      });
+      return;
+    }
+    const pluginId = record.id;
+    const wrapped = createBoundChatHandler({
+      pluginId,
+      route,
+      grant,
+      getGeneration: () => getPluginRegistryGeneration(registry),
+      isCurrent: () =>
+        !isPluginRegistryRetired(registry) &&
+        registry.httpRoutes.some(
+          (entry) =>
+            entry.pluginId === pluginId && entry.path === route.path && entry.handler === wrapped,
+        ),
+    });
+    boundChatHandlers.add(wrapped);
+    registerHttpRoute(record, {
+      path: route.path,
+      auth: "plugin",
+      match: "exact",
+      handler: wrapped,
     });
   };
 
@@ -2828,7 +2928,7 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
       source: record.source,
       rootDir: record.rootDir,
       registrationMode,
-      config: params.config,
+      config: withoutOperatorGrants(params.config),
       pluginConfig: params.pluginConfig,
       runtime: resolvePluginRuntime(record.id),
       logger: normalizeLogger(registryParams.logger),
@@ -2840,6 +2940,7 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
               registerHook: (events, handler, opts) =>
                 registerHook(record, events, handler, opts, params.config, params.pluginConfig),
               registerHttpRoute: (routeParams) => registerHttpRoute(record, routeParams),
+              registerBoundChatRoute: (routeParams) => registerBoundChatRoute(record, routeParams),
               registerHostedMediaResolver: (resolver) =>
                 registerHostedMediaResolver(record, resolver),
               registerProvider: (provider) => registerProvider(record, provider),
@@ -3288,6 +3389,7 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
         ...(registrationCapabilities.setupRuntimeHandlers
           ? {
               registerHttpRoute: (routeParams) => registerHttpRoute(record, routeParams),
+              registerBoundChatRoute: (routeParams) => registerBoundChatRoute(record, routeParams),
               registerGatewayMethod: (method, handler, opts) =>
                 registerGatewayMethod(record, method, handler, opts),
             }
@@ -3374,3 +3476,4 @@ export function createPluginRegistry(registryParams: PluginRegistryParams) {
     registerTypedHook,
   };
 }
+import { withoutOperatorGrants } from "../config/bound-chat.js";

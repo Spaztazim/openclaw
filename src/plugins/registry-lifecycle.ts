@@ -3,11 +3,18 @@ import type { PluginRegistry } from "./registry-types.js";
 
 const retiredRegistries = new WeakSet<PluginRegistry>();
 const activatedRegistries = new WeakSet<PluginRegistry>();
+const registryGenerations = new WeakMap<PluginRegistry, object>();
+
+/** Retirement invalidates issued authority even if the same registry object is reactivated. */
+export function getPluginRegistryGeneration(registry: PluginRegistry): object | undefined {
+  return registryGenerations.get(registry);
+}
 
 /** Marks a registry retired so late runtime calls can reject stale plugin state. */
 export function markPluginRegistryRetired(registry: PluginRegistry | null | undefined): void {
   if (registry) {
     retiredRegistries.add(registry);
+    registryGenerations.set(registry, {});
   }
 }
 

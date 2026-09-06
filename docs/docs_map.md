@@ -3221,6 +3221,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H2: MCP
   - H2: Skills
   - H2: Plugins
+  - H3: Bound chat operator grants
   - H3: Codex harness plugin config
   - H2: Commitments
   - H2: Browser

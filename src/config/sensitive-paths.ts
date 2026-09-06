@@ -55,6 +55,7 @@ function isLocalServiceEnvValuePath(path: string): boolean {
  */
 export function isSensitiveConfigPath(path: string): boolean {
   return (
+    /^plugins\.entries\..+\.grants(?:\.|\[|$)/.test(path) ||
     // Every local service env value is sensitive, even innocuous-looking names.
     isLocalServiceEnvValuePath(path) ||
     (!isWhitelistedSensitivePath(path) && matchesSensitivePattern(path))

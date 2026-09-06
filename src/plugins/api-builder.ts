@@ -23,6 +23,7 @@ export type BuildPluginApiParams = {
       | "registerTool"
       | "registerHook"
       | "registerHttpRoute"
+      | "registerBoundChatRoute"
       | "registerHostedMediaResolver"
       | "registerChannel"
       | "registerGatewayMethod"
@@ -191,13 +192,14 @@ export function buildPluginApi(params: BuildPluginApiParams): OpenClawPluginApi 
     source: params.source,
     rootDir: params.rootDir,
     registrationMode: params.registrationMode,
-    config: params.config,
+    config: withoutOperatorGrants(params.config),
     pluginConfig: params.pluginConfig,
     runtime: params.runtime,
     logger: params.logger,
     registerTool: handlers.registerTool ?? noopRegisterTool,
     registerHook: handlers.registerHook ?? noopRegisterHook,
     registerHttpRoute: handlers.registerHttpRoute ?? noopRegisterHttpRoute,
+    registerBoundChatRoute: handlers.registerBoundChatRoute ?? (() => {}),
     registerHostedMediaResolver:
       handlers.registerHostedMediaResolver ?? noopRegisterHostedMediaResolver,
     registerChannel: handlers.registerChannel ?? noopRegisterChannel,
@@ -293,3 +295,4 @@ export function buildPluginApi(params: BuildPluginApiParams): OpenClawPluginApi 
   };
   return attachPluginApiFacades(api);
 }
+import { withoutOperatorGrants } from "../config/bound-chat.js";

@@ -1420,6 +1420,18 @@ export const FIELD_HELP: Record<string, string> = {
     "Per-plugin enablement override for a specific entry, applied on top of global plugin policy (restart required). Use this to stage plugin rollout gradually across environments.",
   "plugins.entries.*.hooks":
     "Per-plugin typed hook policy controls for core-enforced safety gates. Use this to constrain high-impact hook categories without disabling the entire plugin.",
+  "plugins.entries.*.grants":
+    "Operator-owned, default-deny plugin authority. Edit operator config and restart the Gateway to change grants; plugin config APIs cannot read or author these values. No auto-grants or enabling migration.",
+  "plugins.entries.*.grants.boundChat":
+    "Exact bound-chat-v1 approvals for this plugin ID (restart required). Requires a matching manifest profile and registered canonical path/agent. Duplicate or conflicting slots reject the set. Startup pins the physical session store; its immediate parent must exist.",
+  "plugins.entries.*.grants.boundChat[].allow":
+    "Must be exactly true for explicit operator approval. To revoke, remove the grant and restart; the running Gateway retains its startup approval until restart.",
+  "plugins.entries.*.grants.boundChat[].profile":
+    "Fixed capability profile, currently bound-chat-v1 only. Manifest declarations are metadata and cannot grant authority by themselves.",
+  "plugins.entries.*.grants.boundChat[].path":
+    "Exact canonical HTTP route path registered by the plugin. No wildcards, encoded aliases, duplicate separators or trailing slash. Changes require restart.",
+  "plugins.entries.*.grants.boundChat[].agentId":
+    "Fixed agent ID explicitly present in agents.list. Implicit main fallback is not approval. Store/routing changes at restart create a distinct recovery namespace; retain the old config and store for uncertain-run recovery.",
   "plugins.entries.*.hooks.allowPromptInjection":
     "Controls whether this plugin may mutate prompts through typed hooks. Set false to block `before_prompt_build` and ignore prompt-mutating fields from legacy `before_agent_start`, while preserving legacy `modelOverride` and `providerOverride` behavior.",
   "plugins.entries.*.hooks.allowConversationAccess":

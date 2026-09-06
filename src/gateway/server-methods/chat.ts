@@ -104,6 +104,7 @@ import { deleteMediaBuffer, MEDIA_MAX_BYTES, type SavedMedia } from "../../media
 import { createChannelMessageReplyPipeline } from "../../plugin-sdk/channel-outbound.js";
 import type { ChannelRouteRef } from "../../plugin-sdk/channel-route.js";
 import { isPluginOwnedSessionBindingRecord } from "../../plugins/conversation-binding.js";
+import { assertBoundChatActive, getBoundChatClient } from "../../plugins/post-auth-chat.js";
 import { normalizeAgentId, scopeLegacySessionKeyToAgent } from "../../routing/session-key.js";
 import { normalizeInputProvenance, type InputProvenance } from "../../sessions/input-provenance.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
@@ -3120,6 +3121,7 @@ async function readChatHistoryPage(params: {
 }
 
 async function handleChatHistoryRequest({
+  client,
   params,
   respond,
   context,
@@ -3155,7 +3157,12 @@ async function handleChatHistoryRequest({
     requestedSessionKey: sessionKey,
     agentId: agentIdOverride,
   });
-  const sessionLoadOptions = requestedAgentId ? { agentId: requestedAgentId } : undefined;
+  assertBoundChatActive(client);
+  const sessionLoadOptions = getBoundChatClient(client)
+    ? { agentId: requestedAgentId, config: getBoundChatClient(client)!.grant.config }
+    : requestedAgentId
+      ? { agentId: requestedAgentId }
+      : undefined;
   const { cfg, storePath, store, entry, canonicalKey } = loadSessionEntry(
     sessionKey,
     sessionLoadOptions,
@@ -3220,11 +3227,15 @@ async function handleChatHistoryRequest({
     messages: normalized,
     maxSingleMessageBytes: perMessageHardCap,
   });
-  scheduleChatHistoryManagedImageCleanup({
-    sessionKey,
-    ...(selectedAgent.agentId ? { agentId: selectedAgent.agentId } : {}),
-    context,
-  });
+  // Managed-image cleanup resolves global/dynamic state, not the pinned store.
+  // Bound reads retain transcript history but cannot initiate that unrelated I/O.
+  if (!getBoundChatClient(client)) {
+    scheduleChatHistoryManagedImageCleanup({
+      sessionKey,
+      ...(selectedAgent.agentId ? { agentId: selectedAgent.agentId } : {}),
+      context,
+    });
+  }
   const capped = capArrayByJsonBytes(replaced.messages, maxHistoryBytes).items;
   const bounded = enforceChatHistoryFinalBudget({ messages: capped, maxBytes: maxHistoryBytes });
   const nextOffset =
@@ -3737,7 +3748,10 @@ export const chatHandlers: GatewayRequestHandlers = {
       expectedSessionRoutingContract?: string;
       idempotencyKey: string;
     };
-    const suppressCommandInterpretation = p.suppressCommandInterpretation === true;
+    // Bound chat is message input, never a slash-command/control-plane surface.
+    // The core-only client brand attenuates behavior; it grants no provenance/admin bypass.
+    const suppressCommandInterpretation =
+      p.suppressCommandInterpretation === true || getBoundChatClient(client) !== undefined;
     const explicitOriginResult = normalizeExplicitChatSendOrigin({
       originatingChannel: p.originatingChannel,
       originatingTo: p.originatingTo,
@@ -3751,7 +3765,7 @@ export const chatHandlers: GatewayRequestHandlers = {
     if (
       (p.systemInputProvenance ||
         p.systemProvenanceReceipt ||
-        suppressCommandInterpretation ||
+        p.suppressCommandInterpretation === true ||
         explicitOriginResult.value) &&
       !hasGatewayAdminScope(client)
     ) {
@@ -3760,7 +3774,9 @@ export const chatHandlers: GatewayRequestHandlers = {
         undefined,
         errorShape(
           ErrorCodes.INVALID_REQUEST,
-          p.systemInputProvenance || p.systemProvenanceReceipt || suppressCommandInterpretation
+          p.systemInputProvenance ||
+            p.systemProvenanceReceipt ||
+            p.suppressCommandInterpretation === true
             ? "system provenance fields require admin scope"
             : "originating route fields require admin scope",
         ),
@@ -3806,7 +3822,14 @@ export const chatHandlers: GatewayRequestHandlers = {
       requestedSessionKey: rawSessionKey,
       agentId: agentIdOverride,
     });
-    const sessionLoadOptions = requestedAgentId ? { agentId: requestedAgentId } : undefined;
+    assertBoundChatActive(client);
+    // The fixed capability carries the startup store/config through queued admission.
+    // Ordinary requests retain current-config resolution; no live reload can retarget this one.
+    const sessionLoadOptions = getBoundChatClient(client)
+      ? { agentId: requestedAgentId, config: getBoundChatClient(client)!.grant.config }
+      : requestedAgentId
+        ? { agentId: requestedAgentId }
+        : undefined;
     const sessionLoadStartedAtMs = performance.now();
     const sessionLoadResult = measureDiagnosticsTimelineSpanSync(
       "gateway.chat_send.load_session",
@@ -4027,6 +4050,7 @@ export const chatHandlers: GatewayRequestHandlers = {
     const pendingExpiresAtMs = resolveChatRunExpiresAtMs({ now, timeoutMs });
     // Keep the run abortable while lifecycle mutation owns the session. Admission
     // must reject an expired/missing reservation instead of reviving evicted work.
+    assertBoundChatActive(client);
     context.dedupe.set(pendingChatSendKey, {
       ts: now,
       ok: true,
@@ -4068,6 +4092,8 @@ export const chatHandlers: GatewayRequestHandlers = {
         scope: storePath,
         identities: [sessionKey, backingSessionId],
         assertAllowed: () => {
+          // Session lifecycle admission may queue after reservation; do not revive a revoked call.
+          assertBoundChatActive(client);
           if (context.chatAbortedRuns.has(clientRunId)) {
             return;
           }

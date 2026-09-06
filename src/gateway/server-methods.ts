@@ -5,6 +5,7 @@ import {
   gatewayStartupUnavailableDetails,
   GATEWAY_STARTUP_RETRY_AFTER_MS,
 } from "../../packages/gateway-protocol/src/startup-unavailable.js";
+import { assertBoundChatActive, getBoundChatClient } from "../plugins/post-auth-chat.js";
 import { getPluginRegistryState } from "../plugins/runtime-state.js";
 import { withPluginRuntimeGatewayRequestScope } from "../plugins/runtime/gateway-request-scope.js";
 import { formatControlPlaneActor, resolveControlPlaneActor } from "./control-plane-audit.js";
@@ -56,6 +57,8 @@ function createLazyCoreHandlers(params: {
           // loaded family module once the lazy boundary resolves.
           throw new Error(`lazy gateway handler not found: ${method}`);
         }
+        // Authorization may precede a cold import. Revoke before entering the real handler.
+        assertBoundChatActive(opts.client);
         await handler(opts);
       },
     ]),
@@ -787,18 +790,27 @@ export async function handleGatewayRequest(
     );
     return;
   }
-  const invokeHandler = () =>
-    handler({
+  const invokeHandler = () => {
+    assertBoundChatActive(client);
+    return handler({
       req,
       params: (req.params ?? {}) as Record<string, unknown>,
       client,
       isWebchatConnect,
       respond,
-      context,
+      context: getBoundChatClient(client)
+        ? { ...context, getRuntimeConfig: () => getBoundChatClient(client)!.grant.config }
+        : context,
     });
+  };
   // All handlers run inside a request scope so that plugin runtime
   // subagent methods (e.g. context engine tools spawning sub-agents
   // during tool execution) can dispatch back into the gateway.
   // The scope also carries caller identity into plugin-owned gateway methods.
-  await withPluginRuntimeGatewayRequestScope({ context, client, isWebchatConnect }, invokeHandler);
+  // A fixed operation's client authorizes only its direct handler. Unrelated hooks and
+  // runtime helpers must retain the original empty-scoped plugin HTTP identity.
+  await withPluginRuntimeGatewayRequestScope(
+    getBoundChatClient(client)?.scope ?? { context, client, isWebchatConnect },
+    invokeHandler,
+  );
 }

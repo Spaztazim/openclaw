@@ -266,6 +266,80 @@ See [MCP](/cli/mcp#openclaw-as-an-mcp-client-registry) and
 - `plugins.entries.<id>.config`: plugin-defined config object (validated by native OpenClaw plugin schema when available).
 - Channel plugin account/runtime settings live under `channels.<id>` and should be described by the owning plugin's manifest `channelConfigs` metadata, not by a central OpenClaw option registry.
 
+### Bound chat operator grants
+
+The experimental `bound-chat-v1` capability is default-deny. Enabling a plugin,
+installing it, or declaring a manifest contract does not authorize chat. An
+operator must approve the exact registered route and an agent explicitly listed
+in `agents.list`:
+
+```json5
+{
+  agents: { list: [{ id: "fixed-agent" }] },
+  plugins: {
+    entries: {
+      "example-plugin": {
+        grants: {
+          boundChat: [
+            {
+              allow: true,
+              profile: "bound-chat-v1",
+              path: "/bound-chat",
+              agentId: "fixed-agent",
+            },
+          ],
+        },
+      },
+    },
+  },
+}
+```
+
+- `allow` must be exactly `true`. The grant has only these four members; plugin
+  identity comes from the enclosing entry. No wildcard, method, scope, session,
+  model, tool, or delivery-target fields. Duplicate or conflicting approvals for
+  the same plugin/profile/path reject the grant set. An implicit `main` agent is
+  not approval.
+- The plugin must also declare `contracts.boundChat: ["bound-chat-v1"]` and
+  register that exact profile/path/agent through `api.registerBoundChatRoute`.
+  Manifest contracts remain string-array metadata, not grants.
+- Grants are owned by one validated Gateway startup instance. Generic CLI,
+  discovery and setup loads have no authority. Ordinary plugin reloads retain
+  that Gateway's startup approval. Additions, edits and removals require a
+  Gateway restart, including when removing an enclosing config object. To revoke,
+  remove the grant and restart; editing the file alone does not revoke the running
+  instance. An in-process restart reads new config and creates a new owner.
+- Startup pins the physical session store file with the platform's filesystem
+  `realpath`. If the file does not exist, its immediate parent must already exist
+  and resolve successfully. Missing parents, dangling file symlinks and I/O
+  resolution errors fail closed; startup does not create speculative directories.
+  Prepare the store directory before granting authority. Retargeting the original
+  parent or file symlink does not retarget the running capability.
+- Windows uses native Node filesystem semantics for drive, UNC and junction
+  resolution, not POSIX path emulation or manual case folding. Linux tests do not
+  establish NTFS behavior. Protect the pinned physical target with filesystem
+  permissions; this is not protection against arbitrary privileged filesystem
+  replacement or trusted plugin JavaScript.
+- The pinned store and startup routing enter an opaque, domain-separated session
+  and run namespace. Unchanged startup targets preserve recovery identity;
+  changing the physical store or routing at restart intentionally strands old
+  uncertainty unless the operator retains the old config and recovery store.
+  There is no durable exactly-once guarantee. Timeout, failure, or revocation is
+  not proof that a submitted run had no effect.
+- Plugin API config views omit all entries' grants. Runtime config mutation,
+  replacement and deprecated writes preserve the freshest locked operator grants;
+  plugins cannot add grants or unset grants, their descendants, or their ancestors.
+  Unrelated unsets remain supported. Internal explicit-set/snapshot/precommit
+  options are not part of the plugin write API and are rejected.
+- Bound `read()` retains transcript history reads but does not run global
+  managed-image cleanup. Ordinary `chat.history` retains that cleanup behavior.
+  Capability operation failures omit raw store paths. Normal redacted config
+  snapshots mask the grant block.
+
+Plugins still run as trusted, same-process JavaScript. Config-view restrictions
+and request-scoped authority are not a JavaScript sandbox and do not grant ambient
+operator scopes or a global Gateway bearer.
+
 ### Codex harness plugin config
 
 The bundled `codex` plugin owns native Codex app-server harness settings under

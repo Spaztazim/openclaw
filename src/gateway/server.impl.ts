@@ -626,6 +626,9 @@ export async function startGatewayServer(
     { omitErrorMessage: true },
   );
   cfgAtStart = authBootstrap.cfg;
+  // One validated cold-start owner per startGatewayServer invocation, including
+  // no-respawn restarts. Hot reload closures retain this instance's authority.
+  const boundChatStartup = prepareBoundChatStartup(cfgAtStart);
   startupTrace.setConfig(cfgAtStart);
   if (authBootstrap.generatedToken) {
     log.warn(formatRuntimeGatewayAuthTokenWarning());
@@ -674,6 +677,7 @@ export async function startGatewayServer(
   const { prepareGatewayPluginBootstrap } = await loadStartupPluginsModule();
   const pluginBootstrap = await startupTrace.measure("plugins.bootstrap", () =>
     prepareGatewayPluginBootstrap({
+      boundChatStartup,
       cfgAtStart,
       activationSourceConfig: startupActivationSourceConfig,
       startupRuntimeConfig,
@@ -1387,6 +1391,7 @@ export async function startGatewayServer(
         workspaceDir: defaultWorkspaceDir,
       });
       const loaded = prepareGatewayPluginLoad({
+        boundChatStartup,
         cfg: params.nextConfig,
         workspaceDir: defaultWorkspaceDir,
         log,
@@ -1534,6 +1539,7 @@ export async function startGatewayServer(
         const { reloadDeferredGatewayPlugins } = await loadGatewayPluginBootstrapModule();
         const loaded = await startupTrace.measure("gateway.deferred-plugins", () =>
           reloadDeferredGatewayPlugins({
+            boundChatStartup,
             cfg: gatewayPluginConfigAtStart,
             activationSourceConfig: startupActivationSourceConfig,
             workspaceDir: defaultWorkspaceDir,
@@ -1664,6 +1670,7 @@ export async function startGatewayServer(
               : async () => {
                   const { loadGatewayStartupPluginRuntime } = await loadStartupPluginsModule();
                   return loadGatewayStartupPluginRuntime({
+                    boundChatStartup,
                     cfg: gatewayPluginConfigAtStart,
                     activationSourceConfig: startupActivationSourceConfig,
                     workspaceDir: defaultWorkspaceDir,
@@ -1870,3 +1877,4 @@ export async function startGatewayServer(
     },
   };
 }
+import { prepareBoundChatStartup } from "../config/bound-chat.js";

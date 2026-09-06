@@ -1,6 +1,7 @@
 // Chat directive tag tests cover reply directive metadata, transcript mirrors,
 // current-message reply routing, and dispatched payload ordering.
 import fs from "node:fs";
+import type { IncomingMessage } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -23,10 +24,16 @@ import { replaceSessionEntry } from "../../config/sessions/session-accessor.js";
 import { appendSessionTranscriptMessage } from "../../config/sessions/transcript-append.js";
 import { resolveMirroredTranscriptText } from "../../config/sessions/transcript-mirror.js";
 import { getAgentRunContext } from "../../infra/agent-events.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
+import { createPluginRegistry } from "../../plugins/registry.js";
+import type { PluginRuntime } from "../../plugins/runtime/types.js";
+import { createPluginRecord } from "../../plugins/status.test-helpers.js";
 import { runExclusiveSessionLifecycleMutation } from "../../sessions/session-lifecycle-admission.js";
 import { createDeferred } from "../../test-utils/deferred.js";
 import { withEnvAsync } from "../../test-utils/env.js";
+import { createGatewayPluginRequestHandler } from "../server/plugins-http.js";
 import { readSessionTranscriptIndex } from "../session-transcript-index.fs.js";
+import { makeMockHttpResponse } from "../test-http-response.js";
 import type { GatewayRequestContext } from "./types.js";
 
 const mockState = vi.hoisted(() => ({
@@ -105,6 +112,7 @@ const mockState = vi.hoisted(() => ({
   sandboxWorkspace: null as { workspaceDir: string; containerWorkdir?: string } | null,
   stageSandboxMediaError: null as Error | null,
   stagedRelativePaths: null as string[] | null,
+  boundHookRunner: null as import("../../plugins/hooks.js").HookRunner | null,
   hasBeforeAgentRunHooks: false,
   beforeMessageWriteBlock: false,
   beforeMessageWriteContent: null as string | null,
@@ -325,28 +333,29 @@ vi.mock("../../infra/outbound/session-binding-service.js", async () => {
 });
 
 vi.mock("../../plugins/hook-runner-global.js", () => ({
-  getGlobalHookRunner: () => ({
-    hasHooks: (hookName: string) =>
-      (hookName === "before_agent_run" && mockState.hasBeforeAgentRunHooks) ||
-      (hookName === "before_message_write" &&
-        (mockState.beforeMessageWriteBlock || mockState.beforeMessageWriteContent !== null)),
-    runBeforeMessageWrite: (event: { message: unknown }, ctx: unknown) => {
-      mockState.beforeMessageWriteCalls.push({ message: event.message, ctx });
-      if (mockState.beforeMessageWriteBlock) {
-        return { block: true };
-      }
-      if (mockState.beforeMessageWriteContent !== null) {
-        return {
-          message: {
-            ...(typeof event.message === "object" && event.message !== null ? event.message : {}),
-            role: "user",
-            content: mockState.beforeMessageWriteContent,
-          },
-        };
-      }
-      return undefined;
+  getGlobalHookRunner: () =>
+    mockState.boundHookRunner ?? {
+      hasHooks: (hookName: string) =>
+        (hookName === "before_agent_run" && mockState.hasBeforeAgentRunHooks) ||
+        (hookName === "before_message_write" &&
+          (mockState.beforeMessageWriteBlock || mockState.beforeMessageWriteContent !== null)),
+      runBeforeMessageWrite: (event: { message: unknown }, ctx: unknown) => {
+        mockState.beforeMessageWriteCalls.push({ message: event.message, ctx });
+        if (mockState.beforeMessageWriteBlock) {
+          return { block: true };
+        }
+        if (mockState.beforeMessageWriteContent !== null) {
+          return {
+            message: {
+              ...(typeof event.message === "object" && event.message !== null ? event.message : {}),
+              role: "user",
+              content: mockState.beforeMessageWriteContent,
+            },
+          };
+        }
+        return undefined;
+      },
     },
-  }),
 }));
 
 vi.mock("../../sessions/transcript-events.js", () => ({
@@ -863,11 +872,252 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
     mockState.stagedRelativePaths = null;
     mockState.unstagedSources = null;
     mockState.deleteMediaBufferCalls = [];
+    mockState.boundHookRunner = null;
     mockState.hasBeforeAgentRunHooks = false;
     mockState.beforeMessageWriteBlock = false;
     mockState.beforeMessageWriteContent = null;
     mockState.beforeMessageWriteCalls = [];
     mockState.dispatchBlockedByBeforeAgentRun = false;
+  });
+
+  it.each(["/model unapproved/model", "/stop", "large-attachment"])(
+    "post-auth bound chat runs real send/wait/history without command authority: %s",
+    async (message) => {
+      await createTranscriptFixture("openclaw-post-auth-chat-");
+      const declaration = {
+        path: "/bound-chat",
+        agentId: "main",
+        profile: "bound-chat-v1" as const,
+      };
+      const registry = createPluginRegistry({
+        runtime: {} as PluginRuntime,
+        activateGlobalSideEffects: false,
+        logger: { info() {}, warn() {}, error() {}, debug() {} },
+        boundChatStartup: prepareBoundChatStartup({
+          ...mockState.config,
+          agents: { list: [{ id: declaration.agentId }] },
+          session: {
+            ...(mockState.config.session as Record<string, unknown> | undefined),
+            store: path.join(path.dirname(mockState.transcriptPath), "sessions.json"),
+          },
+          plugins: {
+            entries: { example: { grants: { boundChat: [{ allow: true, ...declaration }] } } },
+          },
+        }),
+      });
+      const record = createPluginRecord({
+        id: "example",
+        contracts: { boundChat: [declaration.profile] },
+      });
+      const context = createChatContext();
+      const results: unknown[] = [];
+      registry.createApi(record, { config: {} }).registerBoundChatRoute({
+        path: declaration.path,
+        agentId: declaration.agentId,
+        profile: declaration.profile,
+        authenticate: () => ({
+          authenticated: true,
+          conversationKey: "conversation",
+          operationKey: message,
+        }),
+        handler: async (_req, _res, capability) => {
+          const attachments =
+            message === "large-attachment"
+              ? [
+                  {
+                    type: "file",
+                    mimeType: "text/plain",
+                    fileName: "large.txt",
+                    content: Buffer.alloc(20 * 1024 * 1024, 0x61).toString("base64"),
+                  },
+                ]
+              : undefined;
+          const sent = await capability.submit({ message, attachments });
+          results.push(sent);
+          expect(sent.ok).toBe(true);
+          const runId = (sent.payload as { runId: string }).runId;
+          expect(runId).toBeTypeOf("string");
+          await waitForAssertion(() => expect(context.dedupe.has(`chat:${runId}`)).toBe(true));
+          results.push(await capability.wait({ timeoutMs: 0 }));
+          results.push(await capability.read({ limit: 1000, maxChars: 500_000 }));
+          return true;
+        },
+      });
+      const log = createSubsystemLogger("test/post-auth-chat");
+      const warnings: string[] = [];
+      vi.spyOn(log, "warn").mockImplementation((warning) => {
+        warnings.push(warning);
+      });
+      const http = createGatewayPluginRequestHandler({
+        registry: registry.registry,
+        log,
+        getGatewayRequestContext: () => context as GatewayRequestContext,
+      });
+      const response = makeMockHttpResponse();
+      await http({ url: declaration.path, headers: {} } as IncomingMessage, response.res);
+      expect(response.res.statusCode, JSON.stringify({ results, warnings })).toBe(200);
+      expect(results).toHaveLength(3);
+      expect(results[1]).toMatchObject({ ok: true, payload: { status: "ok" } });
+      expect(results[2]).toMatchObject({ ok: true, payload: { messages: expect.any(Array) } });
+      expect(mockState.lastDispatchCtx).toMatchObject({
+        AgentId: "main",
+        CommandAuthorized: false,
+        GatewayClientScopes: ["operator.write"],
+        CommandTurn: { kind: "normal", authorized: false },
+      });
+      expect(mockState.lastDispatchCtx?.CommandSource).toBeUndefined();
+      expect(mockState.lastDispatchCtx?.OriginatingTo).toBeUndefined();
+      if (message === "large-attachment") {
+        expect(mockState.savedMediaCalls).toContainEqual({
+          contentType: "text/plain",
+          subdir: "inbound",
+          size: 20 * 1024 * 1024,
+        });
+        expect(mockState.lastDispatchCtx?.MediaPaths?.length).toBeGreaterThan(0);
+      }
+    },
+  );
+
+  it("bound-chat keeps a real unrelated hook runtime empty-scoped while fixed submit succeeds", async () => {
+    await createTranscriptFixture("openclaw-bound-chat-hook-");
+    const { createHookRunner } = await import("../../plugins/hooks.js");
+    const { getPluginRuntimeGatewayRequestScope } =
+      await import("../../plugins/runtime/gateway-request-scope.js");
+    const { createGatewaySubagentRuntime } = await import("../server-plugins.js");
+    const { coreGatewayHandlers } = await import("../server-methods.js");
+    const unrelatedEffect = vi
+      .spyOn(coreGatewayHandlers, "agent")
+      .mockImplementation(({ respond }) => {
+        respond(true, { runId: "unrelated", status: "accepted" });
+      });
+    const declaration = { path: "/bound-chat", agentId: "main", profile: "bound-chat-v1" as const };
+    const registry = createPluginRegistry({
+      runtime: { subagent: createGatewaySubagentRuntime() } as PluginRuntime,
+      activateGlobalSideEffects: false,
+      logger: { info() {}, warn() {}, error() {}, debug() {} },
+      boundChatStartup: prepareBoundChatStartup({
+        ...mockState.config,
+        agents: { list: [{ id: declaration.agentId }] },
+        session: {
+          ...(mockState.config.session as Record<string, unknown> | undefined),
+          store: path.join(path.dirname(mockState.transcriptPath), "sessions.json"),
+        },
+        plugins: {
+          entries: { example: { grants: { boundChat: [{ allow: true, ...declaration }] } } },
+        },
+      }),
+    });
+    const hookApi = registry.createApi(createPluginRecord({ id: "unrelated-hook" }), {
+      config: {},
+    });
+    const observed: unknown[] = [];
+    const attempts: Promise<unknown>[] = [];
+    hookApi.on("before_message_write", () => {
+      observed.push(getPluginRuntimeGatewayRequestScope()?.client?.connect.scopes);
+      attempts.push(
+        hookApi.runtime.subagent
+          .run({ sessionKey: "agent:main:unrelated", message: "must fail" })
+          .catch((error: unknown) => error),
+      );
+    });
+    mockState.boundHookRunner = createHookRunner(registry.registry);
+    const record = createPluginRecord({
+      id: "example",
+      contracts: { boundChat: [declaration.profile] },
+    });
+    let sent: unknown;
+    registry.createApi(record, { config: {} }).registerBoundChatRoute({
+      path: declaration.path,
+      agentId: "main",
+      profile: "bound-chat-v1",
+      authenticate: () => ({ authenticated: true, conversationKey: "c", operationKey: "hook" }),
+      handler: async (_req, _res, capability) => {
+        sent = await capability.submit({ message: "hello" });
+        return true;
+      },
+    });
+    const context = createChatContext();
+    const http = createGatewayPluginRequestHandler({
+      registry: registry.registry,
+      log: createSubsystemLogger("test/bound-chat"),
+      getGatewayRequestContext: () => context as GatewayRequestContext,
+    });
+    await http(
+      { url: declaration.path, headers: {} } as IncomingMessage,
+      makeMockHttpResponse().res,
+    );
+    await waitForAssertion(() => expect(attempts.length).toBeGreaterThan(0));
+    const outcomes = await Promise.all(attempts);
+    expect(sent).toMatchObject({ ok: true });
+    expect(observed).toEqual(observed.map(() => []));
+    expect(
+      outcomes.every(
+        (error) =>
+          error instanceof Error && error.message.includes("missing scope: operator.write"),
+      ),
+    ).toBe(true);
+    expect(unrelatedEffect).not.toHaveBeenCalled();
+  });
+
+  it("bound-chat rechecks lifetime immediately before a real chat run reservation", async () => {
+    await createTranscriptFixture("openclaw-bound-chat-admission-");
+    const declaration = { path: "/bound-chat", agentId: "main", profile: "bound-chat-v1" as const };
+    const registry = createPluginRegistry({
+      runtime: {} as PluginRuntime,
+      activateGlobalSideEffects: false,
+      logger: { info() {}, warn() {}, error() {}, debug() {} },
+      boundChatStartup: prepareBoundChatStartup({
+        ...mockState.config,
+        agents: { list: [{ id: declaration.agentId }] },
+        session: {
+          ...(mockState.config.session as Record<string, unknown> | undefined),
+          store: path.join(path.dirname(mockState.transcriptPath), "sessions.json"),
+        },
+        plugins: {
+          entries: { example: { grants: { boundChat: [{ allow: true, ...declaration }] } } },
+        },
+      }),
+    });
+    const record = createPluginRecord({
+      id: "example",
+      contracts: { boundChat: [declaration.profile] },
+    });
+    const response = makeMockHttpResponse();
+    const context = createChatContext();
+    const originalGet = context.dedupe.get.bind(context.dedupe);
+    vi.spyOn(context.dedupe, "get").mockImplementation((key) => {
+      if (key.startsWith("chat:")) {
+        response.res.end();
+      } // Revoke inside admission, after real handler entry.
+      return originalGet(key);
+    });
+    const reserved = vi.spyOn(context.dedupe, "set");
+    let result: unknown;
+    registry.createApi(record, { config: {} }).registerBoundChatRoute({
+      path: declaration.path,
+      agentId: "main",
+      profile: "bound-chat-v1",
+      authenticate: () => ({
+        authenticated: true,
+        conversationKey: "c",
+        operationKey: "admission",
+      }),
+      handler: async (_req, _res, capability) => {
+        result = await capability
+          .submit({ message: "must not reserve" })
+          .catch((error: unknown) => error);
+        return true;
+      },
+    });
+    const http = createGatewayPluginRequestHandler({
+      registry: registry.registry,
+      log: createSubsystemLogger("test/bound-chat"),
+      getGatewayRequestContext: () => context as GatewayRequestContext,
+    });
+    await http({ url: declaration.path, headers: {} } as IncomingMessage, response.res);
+    expect(result).toBeInstanceOf(Error);
+    expect(reserved).not.toHaveBeenCalled();
+    expect(mockState.lastDispatchCtx).toBeUndefined();
   });
 
   it("broadcasts session metadata changes reported by chat command dispatch", async () => {
@@ -6606,3 +6856,4 @@ describe("chat.send operator UI client sender context", () => {
     expect(mockState.lastDispatchCtx?.SenderUsername).toBeUndefined();
   });
 });
+import { prepareBoundChatStartup } from "../../config/bound-chat.js";

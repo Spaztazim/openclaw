@@ -493,6 +493,8 @@ export type PluginRegistry = {
 };
 
 export type PluginRegistryParams = {
+  /** Internal cold-start owner snapshot, never supplied by plugin registration. */
+  boundChatStartup?: import("../config/bound-chat.js").BoundChatStartup;
   logger: PluginLogger;
   coreGatewayHandlers?: GatewayRequestHandlers;
   coreGatewayMethodNames?: readonly string[];

@@ -2664,6 +2664,8 @@ export type OpenClawPluginApi = {
     opts?: OpenClawPluginHookOptions,
   ) => void;
   registerHttpRoute: (params: OpenClawPluginHttpRouteParams) => void;
+  /** Experimental bound-chat-v1: requires manifest declaration AND runtime operator grant. */
+  registerBoundChatRoute: (params: import("./post-auth-chat.js").BoundChatRoute) => void;
   /** Register a plugin-owned resolver for browser-style hosted media URLs. */
   registerHostedMediaResolver: (resolver: OpenClawPluginHostedMediaResolver) => void;
   /** Register a native messaging channel plugin (channel capability). */

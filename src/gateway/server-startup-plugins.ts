@@ -45,6 +45,7 @@ export function resolveGatewayStartupMaintenanceConfig(params: {
 
 /** Builds plugin startup state and gateway method lists before the server binds. */
 export async function prepareGatewayPluginBootstrap(params: {
+  boundChatStartup?: PluginRegistryParams["boundChatStartup"];
   cfgAtStart: OpenClawConfig;
   activationSourceConfig?: OpenClawConfig;
   startupRuntimeConfig: OpenClawConfig;
@@ -132,6 +133,7 @@ export async function prepareGatewayPluginBootstrap(params: {
     // Full plugin handlers are loaded later so startup does not register duplicate methods.
     ({ pluginRegistry, gatewayMethods: baseGatewayMethods } = await loadGatewayStartupPluginRuntime(
       {
+        boundChatStartup: params.boundChatStartup,
         cfg: gatewayPluginConfig,
         activationSourceConfig,
         workspaceDir: defaultWorkspaceDir,
@@ -149,6 +151,7 @@ export async function prepareGatewayPluginBootstrap(params: {
     // before the gateway exposes the method list.
     ({ pluginRegistry, gatewayMethods: baseGatewayMethods } = await loadGatewayStartupPluginRuntime(
       {
+        boundChatStartup: params.boundChatStartup,
         cfg: gatewayPluginConfig,
         activationSourceConfig,
         workspaceDir: defaultWorkspaceDir,
@@ -210,6 +213,7 @@ export function warnUnregisteredConfiguredMemoryEmbeddingProviders(params: {
 
 /** Loads startup plugin runtimes through the deferred bootstrap boundary. */
 export async function loadGatewayStartupPluginRuntime(params: {
+  boundChatStartup?: PluginRegistryParams["boundChatStartup"];
   cfg: OpenClawConfig;
   activationSourceConfig?: OpenClawConfig;
   workspaceDir: string;
@@ -227,6 +231,7 @@ export async function loadGatewayStartupPluginRuntime(params: {
   // planning without importing plugin package runtimes.
   const { loadGatewayStartupPlugins } = await import("./server-plugin-bootstrap.js");
   const loaded = loadGatewayStartupPlugins({
+    boundChatStartup: params.boundChatStartup,
     cfg: params.cfg,
     activationSourceConfig: params.activationSourceConfig,
     workspaceDir: params.workspaceDir,

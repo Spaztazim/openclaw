@@ -239,6 +239,9 @@ function listReloadRules(): ReloadRule[] {
 }
 
 function matchRule(path: string): ReloadRule | null {
+  if (isBoundChatGrantPath(path)) {
+    return { prefix: path, kind: "restart" };
+  }
   for (const rule of listReloadRules()) {
     if (path === rule.prefix || path.startsWith(`${rule.prefix}.`)) {
       return rule;
@@ -252,6 +255,10 @@ export function resolveConfigReloadMetadata(path: string): ConfigReloadMetadata 
     return { kind: "none" };
   }
   return { kind: matchRule(path)?.kind ?? "restart" };
+}
+
+function isBoundChatGrantPath(path: string): boolean {
+  return /^plugins\.entries\..+\.grants(?:\.boundChat(?:\.|$)|$)/.test(path);
 }
 
 function isPluginInstallTimestampPath(path: string): boolean {
@@ -388,6 +395,7 @@ export function buildGatewayReloadPlan(
 
   for (const path of changedPaths) {
     const isTimestampNoop =
+      !isBoundChatGrantPath(path) &&
       !forceChangedPaths.has(path) &&
       (noopPaths.size > 0 ? noopPaths.has(path) : isPluginInstallTimestampPath(path));
     if (isTimestampNoop) {
@@ -419,5 +427,8 @@ export function buildGatewayReloadPlan(
     plan.reloadHooks = true;
   }
 
+  if (changedPaths.some(isBoundChatGrantPath)) {
+    plan.reloadPlugins = false;
+  }
   return plan;
 }
