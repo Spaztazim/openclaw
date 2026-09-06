@@ -921,6 +921,8 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
           operationKey: message,
         }),
         handler: async (_req, _res, capability) => {
+          const receipt = capability.binding;
+          expect(receipt).toBeDefined();
           const attachments =
             message === "large-attachment"
               ? [
@@ -937,9 +939,13 @@ describe("chat directive tag stripping for non-streaming final payloads", () => 
           expect(sent.ok).toBe(true);
           const runId = (sent.payload as { runId: string }).runId;
           expect(runId).toBeTypeOf("string");
+          expect(runId).toBe(receipt.runId);
           await waitForAssertion(() => expect(context.dedupe.has(`chat:${runId}`)).toBe(true));
-          results.push(await capability.wait({ timeoutMs: 0 }));
-          results.push(await capability.read({ limit: 1000, maxChars: 500_000 }));
+          const waited = await capability.wait({ timeoutMs: 0 });
+          const read = await capability.read({ limit: 1000, maxChars: 500_000 });
+          results.push(waited, read);
+          expect(waited).toMatchObject({ ok: true, payload: { runId: receipt.runId } });
+          expect(read).toMatchObject({ ok: true, payload: { sessionKey: receipt.sessionKey } });
           return true;
         },
       });

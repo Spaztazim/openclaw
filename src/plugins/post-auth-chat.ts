@@ -60,6 +60,12 @@ const readSchema = z
 declare const capabilityBrand: unique symbol;
 type BoundChatCapability = {
   readonly [capabilityBrand]: true;
+  /** Persistable correlation data, not authority or proof that an operation executed. */
+  readonly binding: Readonly<{
+    version: "bound-chat-binding-v1";
+    sessionKey: string;
+    runId: string;
+  }>;
   readonly submit: (input: z.infer<typeof submitSchema>) => Promise<GatewayMethodDispatchResponse>;
   readonly wait: (input?: z.infer<typeof waitSchema>) => Promise<GatewayMethodDispatchResponse>;
   readonly read: (input?: z.infer<typeof readSchema>) => Promise<GatewayMethodDispatchResponse>;
@@ -70,6 +76,7 @@ export type BoundChatRoute = BoundChatDeclaration & {
    */
   authenticate: (
     req: IncomingMessage,
+    res: ServerResponse,
   ) =>
     | false
     | z.infer<typeof authenticationSchema>
@@ -129,9 +136,26 @@ export function createBoundChatHandler(params: {
     const revoke = () => lifetime.abort();
     res.once("close", revoke);
     res.once("finish", revoke);
+    const responseClaimed = () =>
+      lifetime.signal.aborted || res.destroyed || res.writableEnded || res.headersSent;
     try {
       // Nothing callable is minted before the plugin-owned parser/auth/replay stage succeeds.
-      const authenticated = authenticationSchema.safeParse(boundChatData(await authenticate(req)));
+      let authenticationResult: Awaited<ReturnType<BoundChatRoute["authenticate"]>>;
+      try {
+        authenticationResult = await authenticate(req, res);
+      } catch (error) {
+        // The outer failure response is safe only while authentication still owns an open response.
+        if (responseClaimed()) {
+          return true;
+        }
+        throw error;
+      }
+      // End/header flags cover synchronous completion; the event latch covers async finish/close races.
+      // Claim the route before parsing or minting, even if authentication returned positive labels.
+      if (responseClaimed()) {
+        return true;
+      }
+      const authenticated = authenticationSchema.safeParse(boundChatData(authenticationResult));
       if (!authenticated.success) {
         res.statusCode = 401;
         res.end("Unauthorized");
@@ -203,6 +227,7 @@ export function createBoundChatHandler(params: {
       return await invocations.run(invocation, async () => {
         assertActive();
         const capability = {
+          binding: Object.freeze({ version: "bound-chat-binding-v1" as const, sessionKey, runId }),
           submit: async (input: z.infer<typeof submitSchema>) => {
             assertActive();
             return await dispatch("chat.send", {

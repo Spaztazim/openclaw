@@ -546,16 +546,62 @@ It remains a string array: unknown profile strings are inert metadata, not
 permissions. Registration through `api.registerBoundChatRoute` additionally
 requires an exact, cold-start [operator grant](/gateway/configuration-reference#bound-chat-operator-grants).
 The separate registration API supplies `path`, `agentId`, `profile`, an
-`authenticate(req)` callback, and `handler(req, res, capability)`. Authentication
-must parse, authenticate, authorize conversation/operation labels, and enforce
-replay policy before returning `{ authenticated: true, conversationKey, operationKey }`;
-return `false` to deny. The authenticated handler receives only fixed
+`authenticate(req, res)` callback, and `handler(req, res, capability)`. Existing
+one-argument authentication callbacks remain valid. Authentication must parse,
+authenticate, authorize conversation/operation labels, and enforce replay policy
+before returning `{ authenticated: true, conversationKey, operationKey }`.
+
+Return `false` to deny. While the response is open, core supplies the default
+`401 Unauthorized`. To return a precise application rejection, the callback can
+set a status and headers and end its own response, for example:
+
+```ts
+async function authenticate(req, res) {
+  const authenticated = await authenticateApplicationRequest(req);
+  if (!authenticated) {
+    res.writeHead(409, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "operation_conflict" }));
+    return false;
+  }
+  return authenticated;
+}
+```
+
+If authentication has ended or destroyed the response, completed its headers, or
+observed response `finish`/`close`, core claims the route without minting a
+capability or calling the authorized handler. This also applies to positive
+labels returned after response completion and to asynchronous completion races.
+Core never overwrites that response; after committing headers, the plugin is
+responsible for finishing its body. A thrown authentication error uses the
+existing sanitized `500 Internal Server Error` response only while the response
+is still open. No response-authentication flags or dummy capability are accepted.
+
+The authenticated handler receives only fixed
 `submit({ message, attachments?, timeoutMs? })`, `wait({ timeoutMs? })`, and
-`read({ limit?, offset?, maxChars? })` operations. No arbitrary Gateway target or
-scope selection is exposed. Capabilities are request-lifetime-only and cannot be
-retained for later use; recovery requires fresh authentication with the same
-approved labels. Do not infer that a timeout or sanitized failure means a run did
-not execute.
+`read({ limit?, offset?, maxChars? })` operations, plus synchronous correlation data:
+
+```ts
+const receipt = capability.binding;
+// { version: "bound-chat-binding-v1", sessionKey: string, runId: string }
+const durableSnapshot = JSON.stringify(receipt);
+```
+
+OpenClaw owns these execution `sessionKey` and `runId` values. Callers cannot
+supply or override them. The receipt contains exactly these three own data
+properties, is deeply frozen, and can be serialized or cloned for durable
+storage without a `wait()` or `read()` preflight. It contains no grants, physical
+store paths or store-identity hashes, scopes, dispatchers, or additional authority.
+Successful submit/wait `runId` and read `sessionKey` results match the receipt.
+Downstream applications bind these execution IDs to their own logical reservation
+and publication IDs rather than trying to make independently derived IDs equal.
+
+The receipt is correlation data, not authority, an execution acknowledgement, or
+exactly-once proof. It remains inert and readable after revocation. The capability
+itself remains nonserializable, noncloneable, and request-lifetime-only; recovery
+requires fresh authentication with the same approved labels and unchanged startup
+binding. Changing the startup store or routing changes the execution IDs. No
+arbitrary Gateway target or scope selection is exposed. Do not infer that a
+timeout or sanitized failure means a run did not execute.
 
 ```json
 {

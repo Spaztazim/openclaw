@@ -9,6 +9,7 @@ import { resetConfigRuntimeState, setRuntimeConfigSnapshot } from "../../config/
 import { replaceSessionEntry } from "../../config/sessions/session-accessor.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
+import type { OpenClawPluginApi } from "../../plugin-sdk/core.js";
 import { getBoundChatClient } from "../../plugins/post-auth-chat.js";
 import { createPluginRegistry } from "../../plugins/registry.js";
 import { resetPluginRuntimeStateForTest } from "../../plugins/runtime.js";
@@ -88,6 +89,11 @@ it.each(["runtime", "parent", "file"])(
         contracts: { boundChat: [route.profile] },
       });
       let result: unknown;
+      let receipt:
+        | Parameters<
+            Parameters<OpenClawPluginApi["registerBoundChatRoute"]>[0]["handler"]
+          >[2]["binding"]
+        | undefined;
       registry.createApi(record, { config: startupConfig }).registerBoundChatRoute({
         ...route,
         authenticate: () => ({
@@ -96,7 +102,11 @@ it.each(["runtime", "parent", "file"])(
           operationKey: "same",
         }),
         handler: async (_req, _res, cap) => {
-          await cap.submit({ message: "namespace probe" });
+          receipt = cap.binding;
+          expect(receipt).toBeDefined();
+          const sent = await cap.submit({ message: "namespace probe" });
+          expect(sent).toMatchObject({ ok: true, payload: { runId: receipt.runId } });
+          expect(sessionKey).toBe(receipt.sessionKey);
           if (seed) {
             await replaceSessionEntry(
               { storePath: storeA, agentId: "fixed", sessionKey },
@@ -115,6 +125,7 @@ it.each(["runtime", "parent", "file"])(
           startupConfig.session!.store = storeB;
           setRuntimeConfigSnapshot(config(storeB));
           result = await cap.read();
+          expect(result).toMatchObject({ ok: true, payload: { sessionKey: receipt.sessionKey } });
         },
       });
       const http = createGatewayPluginRequestHandler({
@@ -123,15 +134,17 @@ it.each(["runtime", "parent", "file"])(
         getGatewayRequestContext: () => context,
       });
       await http({ url: route.path, headers: {} } as IncomingMessage, makeMockHttpResponse().res);
-      return { key: sessionKey, result };
+      return { key: sessionKey, result, receipt };
     };
     const a = await invoke(initialStore, true);
     expect(a.result).toMatchObject({ ok: true, payload: { sessionId: "store-a" } });
     const unchanged = await invoke(storeA);
     expect(unchanged.key).toBe(a.key);
+    expect(unchanged.receipt).toEqual(a.receipt);
     expect(unchanged.result).toMatchObject({ ok: true, payload: { sessionId: "store-a" } });
     const b = await invoke(storeB);
     expect(b.key).not.toBe(a.key);
+    expect(b.receipt?.runId).not.toBe(a.receipt?.runId);
     expect(b.result).toMatchObject({ ok: true, payload: { messages: [] } });
     expect(JSON.stringify(b.result)).not.toContain("store-b-unrelated");
     expect(JSON.stringify([a.result, b.result])).not.toContain(root);

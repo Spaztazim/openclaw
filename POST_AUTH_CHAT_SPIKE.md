@@ -1,5 +1,45 @@
 # Bound chat local spike
 
+## Incremental authentication response and execution receipt amendment
+
+Base: `59388efb928b98d5786ba2cbcb98471c127268be`, branch `spike/spaz-172-post-auth-capability`, clean at entry. This section supersedes earlier implementation-status statements only for this narrow amendment. The user supplied prior exact-digest Sol acceptance of the base; this amendment has not received a new independent Sol review. No commits, staging, pushes, PRs, issues, remotes, host/service changes, credentials, live installation, or Colony edits.
+
+Implemented:
+
+- `authenticate(req, res)` supports precise plugin-owned rejection status, headers, and JSON body. Existing one-argument callbacks remain valid. False/open retains default 401; thrown/open retains the outer sanitized 500. Completed headers, ended/destroyed responses, and latched finish/close events claim the route before authentication parsing, ID derivation, or capability minting. Late positive results cannot revive authority. Authentication exceptions after response ownership is taken do not cause an outer overwrite. No response-auth flags or dummy capability.
+- Issued capabilities expose synchronous `binding: { version: "bound-chat-binding-v1", sessionKey, runId }`. It is an exact plain own-data object, deeply frozen because its leaves are strings, serializable and cloneable. It contains no standalone store identity, physical path, grant, scope, dispatcher, or minting material. The containing capability remains frozen, nonserializable, noncloneable, and revoked under the existing operation checks.
+- OpenClaw owns execution sessionKey/runId; the existing domain-separated derivation and operation inputs are unchanged. Colony must durably bind these values to its logical reservation/publication IDs, not require cross-algorithm ID equality. Receipt reads require no wait/read preflight or operation effects. Receipt data survives revocation but supplies no authority and is not an execution acknowledgement or exactly-once proof.
+- No new named public exports, config fields, ordinary-route changes, or authority expansion. Production growth is confined to the bound wrapper's response-ownership guard, callback signature, and inert receipt.
+- Plugin contract and operator documentation updated in `docs/plugins/manifest.md` and `docs/gateway/configuration-reference.md`.
+
+Strict RED before production edits, cached Node v22.22.3:
+
+1. `node scripts/run-vitest.mjs run --config test/vitest/vitest.gateway-core.config.ts src/gateway/server/plugins-http.post-auth-chat.test.ts src/gateway/server/plugins-http.bound-chat-lazy.test.ts`: exit 1; 19 failed / 53 passed, 2 files. Custom callbacks received no response, delayed rejection overwrote status, receipt was absent. Node also reported a real `ERR_STREAM_WRITE_AFTER_END` on the delayed-end rejection path.
+2. `node scripts/run-vitest.mjs run --config test/vitest/vitest.gateway-methods.config.ts src/gateway/server-methods/chat.directive-tags.test.ts src/gateway/server-methods/chat.bound-chat-store.test.ts -t 'post-auth|bound-chat'`: exit 1; 6 failed / 2 passed / 134 filtered out. Missing receipt failed real-handler and real-store scenarios.
+
+GREEN and gates executed on pinned foreground Node v22.22.3:
+
+- Gateway-core command above plus `src/gateway/server/plugins-http.runtime-scopes.test.ts`: exit 0, 3 files / 83 passed. Covers real registry/HTTP routing, real Node response state without listening sockets, exact custom 400/401/409/413/503 JSON, default rejection, positive/ended, throws, asynchronous end/destroy/headers/finish/close, fixed-operation denial, ordinary ambient scopes, lazy dispatch, replacement/generation revocation, exact receipt descriptors and mutation/serialization resistance.
+- Gateway-methods command above: exit 0, 2 files / 8 passed / 134 filtered out. Real send/wait/history result IDs match the receipt, including the existing large attachment and command-authority tests. Store tests exercise real history/store reads across runtime, parent-symlink and file-symlink drift; their terminal submit effect remains stubbed. No live model/provider proof is claimed.
+- `node scripts/run-tsgo.mjs -p tsconfig.core.json --incremental --tsBuildInfoFile .artifacts/tsgo-cache/core.tsbuildinfo` and corresponding `-p test/tsconfig/tsconfig.core.test.json --tsBuildInfoFile .artifacts/tsgo-cache/core-test.tsbuildinfo`: each exit 0 after correcting test-table literal inference.
+- `node scripts/run-oxlint.mjs --tsconfig tsconfig.core.json` with the four changed TS paths: exit 0, preparation enabled. Initial no-shadow and mutating-sort findings corrected.
+- `node_modules/.bin/oxfmt --check --threads=1` with the four changed TS paths and two public docs: exit 0.
+- `node scripts/sync-plugin-sdk-exports.mjs --check`: exit 0.
+- `node --max-old-space-size=8192 scripts/plugin-sdk-surface-report.mjs --check`: exit 0; 324 public entrypoints, 10466 public exports, 5222 public callable exports; budget unchanged.
+- `node --max-old-space-size=8192 --import tsx scripts/generate-plugin-sdk-api-baseline.ts --check`: exit 0, existing tracked API hash accepted. No baseline was edited or regenerated.
+- `pnpm docs:list`: exit 0, discovery only. `node scripts/check-docs-mdx.mjs docs/plugins/manifest.md docs/gateway/configuration-reference.md`: exit 0, 2 files. `node scripts/check-docs-i18n-glossary.mjs --base HEAD`: exit 0. `node --import tsx scripts/generate-config-doc-baseline.ts --check`: exit 0. Config schema itself is untouched.
+- `pnpm build`: exit 0; complete full profile, 338.7 seconds, including tsdown/declarations, SDK export verification, runtime postbuild, plugin assets, Control UI and CLI metadata. No ineffective-dynamic-import warning was emitted.
+
+Execution caveat: shell PATH state was not reliable across tool calls. A background version probe and a later foreground version check reported Node v22.22.2; their real-handler runs failed with sanitized operation errors and are not acceptance evidence. Explicitly restoring the cached Node v22.22.3 PATH produced final post-build GREEN: gateway-core 83 passed and gateway-methods 8 passed / 134 filtered out. Tests use no external model or service. Final diff-check passed; HEAD remains the base with seven modified, unstaged files. Public docs plus this report passed MDX and formatting checks; the source link audit checked 5764 internal links with zero broken links. No baseline files changed.
+
+Remaining downstream requirements:
+
+- Colony must persist and atomically bind the OpenClaw receipt to its logical reservation/publication records before submission, enforce conflicts/replay/authorization in its own authentication callback, and return precise application rejections there.
+- Recovery must reauthenticate approved labels and compare the current receipt with the durable binding. Changed startup IDs must not silently retarget uncertain prior work. Durable reservation, publication deduplication, crash recovery and exactly-once policy remain downstream responsibilities.
+- Re-run downstream composition and obtain review of the new exact diff/digest before deployment. No Colony integration or live installation was performed here. Linux source tests do not establish NTFS behavior, full Gateway in-process restart isolation, or a sandbox against trusted in-process JavaScript.
+
+All sections below are historical evidence and must not be mistaken for the acceptance state of this incremental amendment.
+
 ## Corrective continuation after KEEP_AND_HARDEN: acceptance INCOMPLETE
 
 Review reference supplied by parent: `d1a79591c456cecf69192d6b79677d511bb63ccd8274a9cd72872c01ce973181`. This continuation did not independently recompute that digest. Same local branch and accumulated uncommitted worktree; no staging/commit/push, remote/host/service actions, live install, or Colony integration. Cached Node v22.22.3 was confirmed at entry. Parent build/gate results are prior evidence, not acceptance of the new diff.

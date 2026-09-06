@@ -326,6 +326,22 @@ in `agents.list`:
   uncertainty unless the operator retains the old config and recovery store.
   There is no durable exactly-once guarantee. Timeout, failure, or revocation is
   not proof that a submitted run had no effect.
+- OpenClaw owns execution `sessionKey` and `runId`. An authenticated handler can
+  synchronously snapshot `capability.binding`, a deeply frozen, serializable
+  `{ version: "bound-chat-binding-v1", sessionKey, runId }` receipt, without
+  invoking wait/read. Downstream applications store these execution IDs alongside
+  their own logical reservation/publication IDs; they do not supply replacement
+  execution IDs. The receipt is correlation data, not authority, submission
+  acknowledgement, or exactly-once proof. It remains inert after revocation;
+  the capability itself cannot be serialized, cloned, or used after revocation.
+- The plugin's `authenticate(req, res)` callback may return a precise application
+  rejection, including its own JSON status, headers, and body. Returning `false`
+  with an open response retains core's default 401. Completed headers, an ended
+  or destroyed response, or response finish/close during asynchronous authentication
+  claim the route with no capability or authorized-handler call, even if positive
+  labels arrive later. Core does not overwrite that response. Thrown errors retain
+  the sanitized outer 500 response only while the response is open. Existing
+  one-argument callbacks remain valid. See the [plugin contract](/plugins/manifest#contracts-reference).
 - Plugin API config views omit all entries' grants. Runtime config mutation,
   replacement and deprecated writes preserve the freshest locked operator grants;
   plugins cannot add grants or unset grants, their descendants, or their ancestors.

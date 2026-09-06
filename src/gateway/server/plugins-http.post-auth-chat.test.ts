@@ -1,5 +1,6 @@
 /** Real registry -> HTTP dispatcher -> Gateway authorization; only method effects are stubbed. */
-import type { IncomingMessage } from "node:http";
+import { IncomingMessage, ServerResponse } from "node:http";
+import { Socket } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -97,15 +98,14 @@ function harness(
     log: createSubsystemLogger("test/post-auth-chat"),
     getGatewayRequestContext: () => ({}) as GatewayRequestContext,
   });
-  const request = async (authorization?: string) => {
-    const response = makeMockHttpResponse();
-    await http(
+  const request = async (authorization?: string, response = makeMockHttpResponse()) => {
+    const handled = await http(
       { url: binding.path, headers: { authorization } } as IncomingMessage,
       response.res,
       undefined,
       { gatewayAuthSatisfied: true, gatewayRequestOperatorScopes: ["operator.admin"] },
     );
-    return response;
+    return { ...response, handled };
   };
   return { effects, register, request, registry, api };
 }
@@ -126,6 +126,152 @@ function route(overrides: Partial<PluginPostAuthChatRoute> = {}): PluginPostAuth
   };
 }
 
+function realResponse() {
+  // Real Node header/end state, without opening a listening socket or a service.
+  const res = new ServerResponse(new IncomingMessage(new Socket()));
+  return { res, end: vi.spyOn(res, "end"), setHeader: vi.spyOn(res, "setHeader") };
+}
+
+it.each([400, 401, 409, 413, 503])(
+  "preserves custom authentication JSON rejection %s",
+  async (status) => {
+    const h = harness();
+    const authorized = vi.fn(route().handler);
+    const response = realResponse();
+    const body = JSON.stringify({
+      error: { code: `application-${status}`, retryable: status === 503 },
+    });
+    h.register(
+      route({
+        authenticate: (_req, res) => {
+          res.statusCode = status;
+          res.setHeader("Content-Type", "application/json");
+          res.end(body);
+          return false;
+        },
+        handler: authorized,
+      }),
+    );
+    expect((await h.request(undefined, response)).handled).toBe(true);
+    expect(response.res.statusCode).toBe(status);
+    expect(response.res.getHeader("Content-Type")).toBe("application/json");
+    expect(response.end).toHaveBeenCalledExactlyOnceWith(body);
+    expect(authorized).not.toHaveBeenCalled();
+    expect(h.effects).toEqual([]);
+  },
+);
+
+it.each(["false", "positive", "throw"])(
+  "claims completed authentication response even on %s",
+  async (result) => {
+    const h = harness();
+    const authorized = vi.fn(route().handler);
+    const response = realResponse();
+    h.register(
+      route({
+        authenticate: (_req, res) => {
+          res.statusCode = 409;
+          res.end('{"error":"conflict"}');
+          if (result === "throw") {
+            throw new Error("private authentication detail");
+          }
+          return result === "positive" ? positive : false;
+        },
+        handler: authorized,
+      }),
+    );
+    expect((await h.request(undefined, response)).handled).toBe(true);
+    expect(response.res.statusCode).toBe(409);
+    expect(response.end).toHaveBeenCalledExactlyOnceWith('{"error":"conflict"}');
+    expect(authorized).not.toHaveBeenCalled();
+    expect(h.effects).toEqual([]);
+  },
+);
+
+it.each(["false", "throw"])(
+  "keeps default sanitized response for open authentication %s",
+  async (result) => {
+    const h = harness();
+    const authorized = vi.fn(route().handler);
+    const response = realResponse();
+    h.register(
+      route({
+        authenticate: (req) => {
+          expect(req.url).toBe(binding.path); // Existing one-argument callbacks remain valid.
+          if (result === "throw") {
+            throw new Error("private authentication detail");
+          }
+          return false;
+        },
+        handler: authorized,
+      }),
+    );
+    expect((await h.request(undefined, response)).handled).toBe(true);
+    expect(response.res.statusCode).toBe(result === "throw" ? 500 : 401);
+    expect(response.end).toHaveBeenCalledExactlyOnceWith(
+      result === "throw" ? "Internal Server Error" : "Unauthorized",
+    );
+    expect(authorized).not.toHaveBeenCalled();
+    expect(h.effects).toEqual([]);
+  },
+);
+
+it.each(["end", "destroy", "headers", "finish", "close"])(
+  "fails closed across delayed authentication %s",
+  async (event) => {
+    for (const result of [false, positive, "throw"] as const) {
+      const h = harness();
+      const authorized = vi.fn(route().handler);
+      const response = realResponse();
+      let entered!: () => void;
+      const ready = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let release!: () => void;
+      const barrier = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      h.register(
+        route({
+          authenticate: async () => {
+            entered();
+            await barrier;
+            if (result === "throw") {
+              throw new Error("private authentication detail");
+            }
+            return result;
+          },
+          handler: authorized,
+        }),
+      );
+      const pending = h.request(undefined, response);
+      await ready;
+      try {
+        response.res.statusCode = 503;
+        if (event === "end") {
+          response.res.end('{"error":"unavailable"}');
+        } else if (event === "destroy") {
+          response.res.destroy();
+        } else if (event === "headers") {
+          response.res.writeHead(503, { "Content-Type": "application/json" });
+        } else {
+          // Isolate the event latch from persistent flags; delayed completion must not revive it.
+          response.res.emit(event);
+        }
+      } finally {
+        release();
+      }
+      expect((await pending).handled).toBe(true);
+      expect(response.res.statusCode).toBe(503);
+      expect(response.end).toHaveBeenCalledTimes(event === "end" ? 1 : 0);
+      expect(authorized).not.toHaveBeenCalled();
+      expect(h.effects).toEqual([]);
+      expect(response.res.listenerCount("finish")).toBe(0);
+      expect(response.res.listenerCount("close")).toBe(0);
+    }
+  },
+);
+
 it.each([
   { session: { store: path.join(os.tmpdir(), "bound-store-b.json") } },
   { session: { store: path.join(os.tmpdir(), "bound-store-a.json"), scope: "global" as const } },
@@ -137,17 +283,26 @@ it.each([
 ])("startup binding changes namespace without leaking paths: %j", async (changed) => {
   const run = async (startupConfig: OpenClawConfig) => {
     const h = harness({ startupConfig });
-    h.register(route());
+    let receipt: PluginPostAuthChatCapability["binding"] | undefined;
+    h.register(
+      route({
+        handler: (_req, _res, cap) => {
+          receipt = cap.binding;
+        },
+      }),
+    );
     await h.request("test-positive");
-    return h.effects.map((effect) => effect.params);
+    expect(h.effects).toEqual([]); // No wait/read preflight to discover execution IDs.
+    expect(receipt).toBeDefined();
+    return receipt!;
   };
   const a = await run({ session: { store: path.join(os.tmpdir(), "bound-store-a.json") } });
   const same = await run({ session: { store: path.join(os.tmpdir(), "bound-store-a.json") } });
   const b = await run(changed);
   expect(same).toEqual(a);
-  expect(b[0]?.sessionKey).not.toEqual(a[0]?.sessionKey);
-  expect(b[0]?.idempotencyKey).not.toEqual(a[0]?.idempotencyKey);
-  expect(JSON.stringify([a, b])).not.toContain("/private/");
+  expect(b.sessionKey).not.toEqual(a.sessionKey);
+  expect(b.runId).not.toEqual(a.runId);
+  expect(JSON.stringify([a, b])).not.toContain("bound-store-");
 });
 
 it.each(["throw", "response"])("sanitizes bound operation I/O failure: %s", async (mode) => {
@@ -341,11 +496,13 @@ describe("post-plugin-auth bound chat v1", () => {
     h.register(
       route({
         handler: async (_req, _res, capability) => {
-          expect(Object.keys(capability).toSorted()).toEqual(["read", "submit", "wait"]);
+          expect(Object.keys(capability).toSorted()).toEqual(["binding", "read", "submit", "wait"]);
           expect(() => JSON.stringify(capability)).toThrow();
           expect(() => structuredClone(capability)).toThrow();
           expect(Object.isFrozen(capability)).toBe(true);
           for (const key of [
+            "binding",
+            "runId",
             "method",
             "agentId",
             "sessionKey",
@@ -494,6 +651,8 @@ describe("post-plugin-auth bound chat v1", () => {
     { ...positive, conversationKey: "" },
     { ...positive, operationKey: "" },
     { ...positive, extra: true },
+    { ...positive, responseHandled: true },
+    { ...positive, binding: { sessionKey: "caller", runId: "caller" } },
     Object.defineProperty({ ...positive }, "authenticated", { get: () => true }),
     new Proxy({ ...positive }, {}),
   ])("rejects malformed positive auth without capability/effects: %j", async (result) => {
@@ -649,6 +808,67 @@ describe("post-plugin-auth bound chat v1", () => {
     await h.request("test-positive");
     expect(checked).toBe(true);
     expect(h.effects).toEqual([]);
+  });
+
+  it("exposes only frozen serializable execution correlation data, never durable authority", async () => {
+    const h = harness();
+    let retained!: PluginPostAuthChatCapability;
+    let snapshot = "";
+    h.register(
+      route({
+        handler: async (_req, _res, cap) => {
+          retained = cap;
+          const receipt = cap.binding;
+          expect(Reflect.ownKeys(receipt)).toEqual(["version", "sessionKey", "runId"]);
+          expect(Object.getPrototypeOf(receipt)).toBe(Object.prototype);
+          expect(Object.isFrozen(receipt)).toBe(true);
+          expect(receipt.version).toBe("bound-chat-binding-v1");
+          expect(receipt.sessionKey).toBeTypeOf("string");
+          expect(receipt.runId).toBeTypeOf("string");
+          for (const key of Reflect.ownKeys(receipt)) {
+            expect(Object.getOwnPropertyDescriptor(receipt, key)).toEqual({
+              value: receipt[key as keyof typeof receipt],
+              enumerable: true,
+              configurable: false,
+              writable: false,
+            });
+            expect(Reflect.set(receipt, key, "override")).toBe(false);
+            expect(Reflect.deleteProperty(receipt, key)).toBe(false);
+          }
+          expect(Reflect.set(receipt, "grant", {})).toBe(false);
+          expect(Reflect.setPrototypeOf(receipt, null)).toBe(false);
+          expect(Reflect.set(cap, "binding", {})).toBe(false);
+          expect(() =>
+            Object.defineProperty(receipt, "runId", { get: () => "override" }),
+          ).toThrow();
+          snapshot = JSON.stringify(receipt);
+          expect(JSON.parse(snapshot)).toEqual(receipt);
+          expect(structuredClone(receipt)).toEqual(receipt);
+          expect(() => JSON.stringify(cap)).toThrow("nonserializable");
+          expect(() => structuredClone(cap)).toThrow();
+          await cap.submit({ message: "hello" });
+          await cap.wait();
+          await cap.read();
+        },
+      }),
+    );
+    expect((await h.request("test-positive")).res.statusCode).toBe(200);
+    const receipt = retained.binding;
+    expect(h.effects.map((effect) => effect.params)).toMatchObject([
+      { sessionKey: receipt.sessionKey, idempotencyKey: receipt.runId },
+      { runId: receipt.runId },
+      { sessionKey: receipt.sessionKey },
+    ]);
+    expect(JSON.stringify(receipt)).toBe(snapshot);
+    for (const operation of [
+      () => retained.submit({ message: "late" }),
+      () => retained.wait(),
+      () => retained.read(),
+    ]) {
+      await expect(operation()).rejects.toThrow("inactive");
+    }
+    expect(h.effects).toHaveLength(3);
+    expect(JSON.stringify(retained.binding)).toBe(snapshot);
   });
 
   it("revokes retained capabilities on completion and handler exception", async () => {
